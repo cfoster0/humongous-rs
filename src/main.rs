@@ -5,23 +5,28 @@ use futures::stream::{self, Stream, StreamExt, BoxStream};
 use std::io::Result;
 use bytes::Bytes;
 use nom::{Err, IResult, Needed};
-use warc_parser::{records};
+use warc_parser::{record, records};
 use reqwest::{get, Response};
 use tokio::prelude::*;
 
 pub type Warc = warc_parser::Record;
 
-pub struct WarcDecoder<'a> {
+pub enum WarcResult {
+    WarcOk(Warc),
+    WarcError,
+}
+
+pub struct UncompressedWarcDecoder<'a> {
     stream: BoxStream<'a, reqwest::Result<Bytes>>,
     buffer: Vec<u8>,
     records: Vec<Warc>,
     stream_done: bool,
 }
 
-impl<'a, S> From<S> for WarcDecoder<'a> 
+impl<'a, S> From<S> for UncompressedWarcDecoder<'a> 
 where S: 'a + Stream<Item = reqwest::Result<Bytes>> + std::marker::Send {
     fn from(stream: S) -> Self {
-        return WarcDecoder {
+        return UncompressedWarcDecoder {
             stream: stream.boxed(),
             buffer: Vec::new(),
             records: Vec::new(),
@@ -30,12 +35,7 @@ where S: 'a + Stream<Item = reqwest::Result<Bytes>> + std::marker::Send {
     }
 }
 
-pub enum WarcResult {
-    WarcOk(Warc),
-    WarcError,
-}
-
-impl Stream for WarcDecoder<'_> {
+impl Stream for UncompressedWarcDecoder<'_> {
     type Item = WarcResult;
     
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
@@ -68,7 +68,7 @@ impl Stream for WarcDecoder<'_> {
             }
         }
         
-        // Remove all bytes from the buffer and try to build records from them
+        // Remove all bytes from the buffer and try to build a set of records from them
         let slice = me.buffer.split_off(0);
         match records(slice.as_slice()) {
             // If records can be parsed from the buffered bytes
@@ -76,6 +76,23 @@ impl Stream for WarcDecoder<'_> {
                 println!("{:?} records were parsed!", entries.len());
                 // Add parsed records to the queue
                 me.records.extend(entries);
+                // Put remaining bytes back in the buffer
+                me.buffer.extend_from_slice(remainder);
+            },
+            // Should deal with other cases explicitly, for error and incomplete cases
+            _ => {
+                me.buffer.extend(slice);
+            },
+        };
+
+        // Remove all bytes from the buffer and try to build a single record from them
+        let slice = me.buffer.split_off(0);
+        match record(slice.as_slice()) {
+            // If records can be parsed from the buffered bytes
+            Ok((remainder, entry)) => {
+                println!("1 record was parsed!");
+                // Add parsed record to the queue
+                me.records.push(entry);
                 // Put remaining bytes back in the buffer
                 me.buffer.extend_from_slice(remainder);
             },
@@ -104,19 +121,22 @@ impl Stream for WarcDecoder<'_> {
     }
 }
 
-pub async fn get_warc_records(url: &str) -> Option<WarcDecoder<'static>> {
+pub async fn get_uncompressed_warc_records(url: &str) -> Option<UncompressedWarcDecoder<'static>> {
     match reqwest::get(url).await {
         Ok(response) => {
-            return Some(WarcDecoder::from(response.bytes_stream()));
+            return Some(UncompressedWarcDecoder::from(response.bytes_stream()));
         },
         Err(_) => return None
     }
 }
 
-pub async fn get_compressed_warc_records(url: &str) -> Option<WarcDecoder<'static>> {
+pub struct CompressedWarcDecoder{}
+
+
+pub async fn get_compressed_warc_records(url: &str) -> Option<CompressedWarcDecoder> {
     match reqwest::get(url).await {
         Ok(response) => {
-            return Some(WarcDecoder::from(response.bytes_stream()));
+            unimplemented!();
         },
         Err(_) => return None
     }
@@ -124,7 +144,14 @@ pub async fn get_compressed_warc_records(url: &str) -> Option<WarcDecoder<'stati
 
 #[tokio::main]
 pub async fn main() {
-    let stream_option = get_warc_records("https://raw.githubusercontent.com/sbeckeriv/warc_nom_parser/master/sample/plethora.warc").await;
+    //let stream_option = get_uncompressed_warc_records("https://raw.githubusercontent.com/sbeckeriv/warc_nom_parser/master/sample/plethora.warc").await;
+    //let stream_option = get_uncompressed_warc_records("https://raw.githubusercontent.com/sbeckeriv/warc_nom_parser/master/sample/bbc.warc").await;
+    let stream_option = get_uncompressed_warc_records("https://github.com/webrecorder/warcio/raw/master/test/data/example.warc").await;
+
+    // DON'T WORK
+    //let stream_option = get_compressed_warc_records("https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735810.18/crawldiagnostics/CC-MAIN-20200803111838-20200803141838-00347.warc.gz").await;
+    //let stream_option = get_compressed_warc_records("https://github.com/webrecorder/warcio/raw/master/test/data/example.warc.gz").await;
+    //let stream_option = get_compressed_warc_records("https://archive.org/download/warc-www.hifimuseum.de-2018-11-26/www.hifimuseum.de_2018-11-26-00000.warc.gz").await;
     match stream_option {
         Some(stream) => {
             println!("Stream successfully connected!");
