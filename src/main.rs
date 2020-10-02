@@ -197,15 +197,15 @@ pub async fn main() {
         //let stream_option = get_uncompressed_warc_records("https://raw.githubusercontent.com/sbeckeriv/warc_nom_parser/master/sample/bbc.warc").await;
 
         //let stream_option = get_compressed_warc_records("https://github.com/webrecorder/warcio/raw/master/test/data/example.warc.gz").await;
-        //let stream_option = get_compressed_warc_records("https://archive.org/download/warc-www.hifimuseum.de-2018-11-26/www.hifimuseum.de_2018-11-26-00000.warc.gz").await;
-        let stream_option = get_compressed_warc_records("https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735810.18/warc/CC-MAIN-20200803111838-20200803141838-00363.warc.gz").await;
+        let stream_option = get_compressed_warc_records("https://archive.org/download/warc-www.hifimuseum.de-2018-11-26/www.hifimuseum.de_2018-11-26-00000.warc.gz").await;
+        //let stream_option = get_compressed_warc_records("https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735810.18/warc/CC-MAIN-20200803111838-20200803141838-00363.warc.gz").await;
         match stream_option {
             Some(stream) => {
                 println!("Stream successfully connected!");
-                //let count = stream.fuse().fold(0, |acc, x| async move { acc + 1 }).await;
-                //println!("Number of WARC records: {:?}", count);
-                let collection = stream.fuse().collect::<Vec<WarcResult>>().await;
-                println!("Number of WARC records: {:?}", collection.len());
+                let count = stream.fuse().fold(0, |acc, x| async move { acc + 1 }).await;
+                println!("Number of WARC records: {:?}", count);
+                //let collection = stream.fuse().collect::<Vec<WarcResult>>().await;
+                //println!("Number of WARC records: {:?}", collection.len());
                 return ();
             },
             None => {
