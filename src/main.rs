@@ -9,8 +9,9 @@ use nom::{Err, IResult, Needed};
 use warc_parser::{record, records};
 use reqwest::{get, Response};
 use tokio::prelude::*;
-use log::{debug, info, error};
+use log::{trace, debug, info, warn, error};
 use env_logger;
+use bumpalo::Bump;
 
 pub type Warc = warc_parser::Record;
 pub struct WarcError();
@@ -72,70 +73,53 @@ impl Stream for WarcDecoder<'_> {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         let me = Pin::into_inner(self);
         
+        // If inner stream has not yet ended
         if !me.stream_done {
+            // Loop until we get pending or the end of stream
             loop {
+                // Poll inner stream for current status
                 let polled = Pin::new(&mut me.stream).poll_next(cx);
                 match polled {
-                    // Bytestream is finished
+                    // Byte stream is finished
                     Poll::Ready(None) => {
                         info!("Nothing left in byte stream!");
                         me.stream_done = true;
                         break;
                     },
-                    // Bytestream yielded new bytes
+                    // Byte stream yielded new bytes
                     Poll::Ready(Some(MyResult::Ok(bytes))) => {
                         let mut byte_vec: Vec<u8> = bytes.into_iter().collect();
-                        //debug!("Got {:?} bytes!", byte_vec.len());
                         me.buffer.append(&mut byte_vec);
                     },
-                    // Bytestream has an error
+                    // Byte stream has an error
                     Poll::Ready(Some(_)) => {
                         error!("An error occurred!");
                         return Poll::Ready(Some(WarcResult::WarcErr(WarcError())))
                     },
-                    // Bytestream not yet ready
+                    // Byte stream not yet ready
                     Poll::Pending => break,
                 }
             }
         }
         
         // Remove all bytes from the buffer and try to build a set of records from them
-        let slice = me.buffer.split_off(0);
-        match records(slice.as_slice()) {
-            // If records can be parsed from the buffered bytes
-            Ok((remainder, entries)) => {
-                info!("{:?} records were parsed!", entries.len());
-                //println!("{:?}", entries);
-                // Add parsed records to the queue
-                me.records.extend(entries);
-                // Put remaining bytes back in the buffer
-                me.buffer.extend_from_slice(remainder);
-            },
-            // Should deal with other cases explicitly, for error and incomplete cases
-            _ => {
-                me.buffer.extend(slice);
-            },
+        me.buffer = {
+            let drain = me.buffer.drain(..);
+            match records(drain.as_slice()) {
+                // If records can be parsed from the buffered bytes
+                Ok((remainder, entries)) => {
+                    debug!("{:?} records were parsed!", entries.len());
+                    // Add parsed records to the queue
+                    me.records.extend(entries);
+                    // Put remaining bytes back in the buffer
+                    remainder.to_vec()
+                },
+                // Should deal with other cases explicitly, for error and incomplete cases
+                _ => {
+                    drain.collect()
+                },
+            }
         };
-
-        /*
-        // Remove all bytes from the buffer and try to build a single record from them
-        let slice = me.buffer.split_off(0);
-        match record(slice.as_slice()) {
-            // If records can be parsed from the buffered bytes
-            Ok((remainder, entry)) => {
-                debug!("1 record was parsed!");
-                // Add parsed record to the queue
-                me.records.push(entry);
-                // Put remaining bytes back in the buffer
-                me.buffer.extend_from_slice(remainder);
-            },
-            // Should deal with other cases explicitly, for error and incomplete cases
-            _ => {
-                //debug!("No more records without more bytes!");
-                me.buffer.extend(slice);
-            },
-        };
-        */
 
         match me.records.pop() {
             // Take a record from the queue
@@ -201,15 +185,15 @@ pub async fn main() {
         //let stream_option = get_compressed_warc_records("https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735810.18/warc/CC-MAIN-20200803111838-20200803141838-00363.warc.gz").await;
         match stream_option {
             Some(stream) => {
-                println!("Stream successfully connected!");
-                let count = stream.fuse().fold(0, |acc, x| async move { acc + 1 }).await;
-                println!("Number of WARC records: {:?}", count);
-                //let collection = stream.fuse().collect::<Vec<WarcResult>>().await;
-                //println!("Number of WARC records: {:?}", collection.len());
+                info!("Stream successfully connected!");
+                //let count = stream.fuse().fold(0, |acc, x| async move { acc + 1 }).await;
+                //println!("Number of WARC records: {:?}", count);
+                let collection = stream.fuse().collect::<Vec<WarcResult>>().await;
+                info!("Number of WARC records: {:?}", collection.len());
                 return ();
             },
             None => {
-                println!("Stream was not successfully connected.");
+                error!("Stream was not successfully connected.");
                 return ();
             }
         }
