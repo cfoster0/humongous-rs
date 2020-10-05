@@ -20,7 +20,7 @@ use bumpalo::Bump;
 
 use whatlang::{detect_lang};
 use httparse;
-use chardet::charset2encoding;
+use chardetng::EncodingDetector;
 use encoding::DecoderTrap;
 use encoding::label::encoding_from_whatwg_label;
 use ammonia::Builder;
@@ -202,31 +202,26 @@ pub fn http_body(mut warc: Warc) -> String {
     if let Some(i) = body_index {
         let body = warc.content.split_off(i);
 
-        let result = chardet::detect(body.as_slice());
-        // result.0 Encode
-        // result.1 Confidence
-        // result.2 Language
-
-        debug!("{:?}: {:?}", result.0, result.1);
-
-        // decode file into utf-8
-        let coder = encoding_from_whatwg_label(charset2encoding(&result.0));
-        if coder.is_some() {
-            match coder.unwrap().decode(&body, DecoderTrap::Ignore) {
-                Ok(text) => return text.to_string(),
-                _ => (),
-            }
-        }
+        let mut encoding_detector = EncodingDetector::new();
+        let not_ascii = encoding_detector.feed(body.as_slice(), true);
+        let char_encoding = encoding_detector.guess(None, true);
+        let (cow, true_encoding, malformed) = char_encoding.decode(&body);
+        debug!("{:?}", true_encoding);
+        return cow.into_owned();
     }
     return String::new();
 }
 
 pub fn tag_language(text: String) -> (String, Option<whatlang::Lang>) {
-    let sanitized_text = ammonia::Builder::default().allowed_classes(HashMap::new()).tags(HashSet::new()).clean(&text).to_string();
+    let sanitized_text = ammonia::Builder::default().allowed_classes(HashMap::new())
+                                                    .tags(HashSet::new())
+                                                    .generic_attributes(HashSet::new())
+                                                    .clean(&text)
+                                                    .to_string();
     let language = {
         if sanitized_text.len() > 25 {
             let lang = detect_lang(&sanitized_text);
-            info!("Language detected: {:?}", lang);
+            debug!("Language detected: {:?}", lang);
             lang
         } else {
             None
@@ -240,15 +235,14 @@ pub async fn main() {
     env_logger::init();
 
     let urls = vec![
-        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00000.warc.gz",
+        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00000.warc.gz",
         //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00001.warc.gz",
         //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00002.warc.gz",
         //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00003.warc.gz",
         //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00004.warc.gz",
-        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00005.warc.gz",
+        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00005.warc.gz",
         //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00006.warc.gz",
         //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00007.warc.gz",
-        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00008.warc.gz",
         //
         //"https://archive.org/download/warc-www.hifimuseum.de-2018-11-26/www.hifimuseum.de_2018-11-26-00000.warc.gz",
         //"https://github.com/webrecorder/warcio/raw/master/test/data/example.warc.gz",
@@ -271,7 +265,7 @@ pub async fn main() {
                             _ => "".to_string(),
                         }
                     }).map(|x| tag_language(x)).fuse().fold(0u32, |acc, x| async move { acc + 1 }).await;
-                    println!("Number of WARC records: {:?}", count);
+                    info!("Number of WARC records: {:?}", count);
                     //let collection = stream.fuse().collect::<Vec<WarcResult>>().await;
                     //info!("Number of WARC records from {:?}: {:?}", url, collection.len());
                     return ();
