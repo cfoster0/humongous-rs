@@ -1,6 +1,7 @@
 
 use std::collections::{HashMap, HashSet};
 use bytes::Bytes;
+use maplit::{hashmap, hashset};
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -183,12 +184,14 @@ pub async fn get_compressed_warc_records(url: &str) -> Option<WarcDecoder<'stati
     }
 }
 
-pub fn http_body(mut warc: Warc) -> String {
+pub fn http_response_body(mut warc: Warc) -> Option<String> {
     // WARC-Type is required by the spec, so this will panic if it is not included
     let warc_type = warc.headers.get("WARC-Type").unwrap();
     if warc_type != "response" {
-        return "".to_string();
+        return None;
     }
+    // For WARC sets other than Common Crawl, consider filtering by "Content-Type".
+    // Common Crawl already restricts itself to HTML files, but others (such as IA) don't.
     let mut headers = [httparse::EMPTY_HEADER; 32];
 
     let body_index = match httparse::Response::new(&mut headers).parse(warc.content.as_slice()) {
@@ -199,24 +202,31 @@ pub fn http_body(mut warc: Warc) -> String {
             None
         },
     };
+
     if let Some(i) = body_index {
         let body = warc.content.split_off(i);
 
         let mut encoding_detector = EncodingDetector::new();
+        // To check the encoding using a subset of the record
+        // (instead of the entire buffer), comment out the line below 
+        // and uncomment the line after it.
         let not_ascii = encoding_detector.feed(body.as_slice(), true);
+        //let not_ascii = encoding_detector.feed(&body[..1024], false);
         let char_encoding = encoding_detector.guess(None, true);
         let (cow, true_encoding, malformed) = char_encoding.decode(&body);
         debug!("{:?}", true_encoding);
-        return cow.into_owned();
+        let text = cow.into_owned();
+        //trace!("{:?}", text);
+        return Some(text);
     }
-    return String::new();
+    return None;
 }
 
-pub fn tag_language(text: String) -> (String, Option<whatlang::Lang>) {
+pub fn tag_language(text: &str) -> Option<whatlang::Lang> {
     let sanitized_text = ammonia::Builder::default().allowed_classes(HashMap::new())
                                                     .tags(HashSet::new())
                                                     .generic_attributes(HashSet::new())
-                                                    .clean(&text)
+                                                    .clean(text)
                                                     .to_string();
     let language = {
         if sanitized_text.len() > 25 {
@@ -227,7 +237,16 @@ pub fn tag_language(text: String) -> (String, Option<whatlang::Lang>) {
             None
         }
     };
-    return (text, language);
+    return language;
+}
+
+pub fn html_to_text(text: String) -> String {
+    let allowed_tags = hashset!["h1"];
+    let sanitized_text = ammonia::Builder::new().tags(allowed_tags)
+                                                .clean(&text)
+                                                .to_string();
+    //error!("{:?}", sanitized_text);
+    return text;
 }
 
 #[tokio::main]
@@ -236,13 +255,13 @@ pub async fn main() {
 
     let urls = vec![
         "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00000.warc.gz",
-        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00001.warc.gz",
-        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00002.warc.gz",
-        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00003.warc.gz",
-        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00004.warc.gz",
-        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00005.warc.gz",
-        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00006.warc.gz",
-        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00007.warc.gz",
+        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00001.warc.gz",
+        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00002.warc.gz",
+        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00003.warc.gz",
+        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00004.warc.gz",
+        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00005.warc.gz",
+        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00006.warc.gz",
+        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00007.warc.gz",
         //
         //"https://archive.org/download/warc-www.hifimuseum.de-2018-11-26/www.hifimuseum.de_2018-11-26-00000.warc.gz",
         //"https://github.com/webrecorder/warcio/raw/master/test/data/example.warc.gz",
@@ -259,12 +278,27 @@ pub async fn main() {
             match stream_option {
                 Some(stream) => {
                     info!("Stream successfully connected from {:?}!", url);
-                    let count = stream.map(|x| {
-                        match x {
-                            WarcResult::Ok(x) => http_body(x),
-                            _ => "".to_string(),
-                        }
-                    }).map(|x| tag_language(x)).fuse().fold(0u32, |acc, x| async move { acc + 1 }).await;
+                    let count = stream.then(|x| async move {
+                                            match x {
+                                                WarcResult::Ok(x) => http_response_body(x),
+                                                _ => None,
+                                            }})
+                                        .then(|x| async move {
+                                            match x {
+                                                Some(x) => {
+                                                    let lang = tag_language(&x);
+                                                    Some((x, lang))
+                                                },
+                                                None => None,
+                                            }})
+                                        .then(|x| async move {
+                                            match x {
+                                                Some((text, lang)) => Some(html_to_text(text)),
+                                                None => None,
+                                            }})
+                                        .fuse()
+                                        .fold(0u32, |acc, x| async move { acc + 1 })
+                                        .await;
                     info!("Number of WARC records: {:?}", count);
                     //let collection = stream.fuse().collect::<Vec<WarcResult>>().await;
                     //info!("Number of WARC records from {:?}: {:?}", url, collection.len());
