@@ -21,7 +21,7 @@ use log::{trace, debug, info, warn, error};
 use env_logger;
 use bumpalo::Bump;
 
-use whatlang::{detect_lang};
+use whatlang::detect;
 use httparse;
 use chardetng::EncodingDetector;
 use encoding::DecoderTrap;
@@ -228,7 +228,7 @@ pub fn http_response_body(mut warc: Warc) -> Option<String> {
 
 pub fn tag_language(text: &str) -> Option<whatlang::Lang> {
     let char_count = text.chars().count();
-    let take_to = min(char_count, 1024);
+    let take_to = min(char_count, 4096);
     let subset = text.chars().take(take_to).collect::<String>();
     let sanitized_subset = ammonia::Builder::default().allowed_classes(HashMap::new())
                                                     .tags(HashSet::new())
@@ -236,10 +236,15 @@ pub fn tag_language(text: &str) -> Option<whatlang::Lang> {
                                                     .clean(&subset)
                                                     .to_string();
     let language = {
-        if sanitized_subset.len() > 25 {
-            let lang = detect_lang(&sanitized_subset);
-            debug!("Language detected: {:?}", lang);
-            lang
+        if sanitized_subset.len() > 128 {
+            let info = detect(&sanitized_subset)?;
+            let lang = info.lang();
+            if info.is_reliable() {
+                debug!("Language detected: {:?}", lang);
+                Some(lang)
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -284,6 +289,7 @@ pub async fn main() {
                     Ok(warc) => {
                         if let Some(body) = http_response_body(warc) {
                             let lang = tag_language(&body);
+                            tokio::task::yield_now().await;
                             html_to_text(body);
                         };
                         tally_sender.send(()).await;
