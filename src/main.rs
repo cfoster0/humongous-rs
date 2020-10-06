@@ -27,6 +27,7 @@ use chardetng::EncodingDetector;
 use encoding::DecoderTrap;
 use encoding::label::encoding_from_whatwg_label;
 use ammonia::Builder;
+use lol_html::{rewrite_str, RewriteStrSettings};
 
 pub type Warc = warc_parser::Record;
 pub struct WarcError();
@@ -194,7 +195,7 @@ pub fn http_response_body(mut warc: Warc) -> Option<String> {
     }
     // For WARC sets other than Common Crawl, consider filtering by "Content-Type".
     // Common Crawl already restricts itself to HTML files, but others (such as IA) don't.
-    let mut headers = [httparse::EMPTY_HEADER; 16];
+    let mut headers = [httparse::EMPTY_HEADER; 32];
 
     let body_index = match httparse::Response::new(&mut headers).parse(warc.content.as_slice()) {
         Ok(httparse::Status::Complete((body_index))) => {
@@ -252,8 +253,15 @@ pub fn tag_language(text: &str) -> Option<whatlang::Lang> {
     return language;
 }
 
-pub fn html_to_text(text: String) -> String {
-    return text;
+pub fn html_to_text(settings: RewriteStrSettings, text: String) -> Option<String> {
+    match rewrite_str(&text, settings) {
+        Ok(rewritten) => Some(rewritten),
+        _ => None,
+    }
+}
+
+pub fn default_rewriting_settings<'h, 's>() -> RewriteStrSettings<'h,'s> {
+    return RewriteStrSettings::default(); 
 }
 
 #[tokio::main]
@@ -262,38 +270,61 @@ pub async fn main() {
 
     let urls = vec![
         "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00000.warc.gz",
-        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00001.warc.gz",
-        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00002.warc.gz",
-        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00003.warc.gz",
-        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00004.warc.gz",
-        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00005.warc.gz",
-        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00006.warc.gz",
-        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00007.warc.gz",
+        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00001.warc.gz",
+        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00002.warc.gz",
+        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00003.warc.gz",
+        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00004.warc.gz",
+        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00005.warc.gz",
+        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00006.warc.gz",
+        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00007.warc.gz",
         //
         //"https://archive.org/download/warc-www.hifimuseum.de-2018-11-26/www.hifimuseum.de_2018-11-26-00000.warc.gz",
         //"https://github.com/webrecorder/warcio/raw/master/test/data/example.warc.gz",
     ];
 
-    const N_PROCESSOR_TASKS: usize = 8;
+    const N_TAGGING_TASKS: usize = 8;
+    const N_HTML_TO_TEXT_TASKS: usize = 8;
 
-    let (sender, receiver) = unbounded::<Warc>();
-
+    let (warc_sender, warc_receiver) = unbounded::<Warc>();
+    let (html_sender, html_receiver) = unbounded::<(whatlang::Lang, String)>();
     let (tally_sender, tally_receiver) = unbounded::<()>();
 
-    let process_handles = [..N_PROCESSOR_TASKS].iter().map(move |_| {
-        let receiver = receiver.clone();
-        let tally_sender = tally_sender.clone();
+    let process_handles = [..N_TAGGING_TASKS].iter().map(move |_| {
+        let warc_receiver = warc_receiver.clone();
+        let html_sender = html_sender.clone();
+
         tokio::spawn(async move {
             loop {
-                match receiver.recv().await {
+                match warc_receiver.recv().await {
                     Ok(warc) => {
                         if let Some(body) = http_response_body(warc) {
                             let lang = tag_language(&body);
-                            tokio::task::yield_now().await;
-                            html_to_text(body);
+                            match lang {
+                                Some(l) => {
+                                    html_sender.send((l, body)).await;
+                                },
+                                _ => ()
+                            }
                         };
+                    },
+                    Err(async_channel::RecvError) => {
+                        break
+                    },
+                }
+            }
+            ()
+        })
+    });
+
+    let html_to_text_handles = [..N_HTML_TO_TEXT_TASKS].iter().map(move |_| {
+        let html_receiver = html_receiver.clone();
+        let tally_sender = tally_sender.clone();
+
+        tokio::spawn(async move {
+            loop {
+                match html_receiver.recv().await {
+                    Ok((lang, html)) => {
                         tally_sender.send(()).await;
-                        ()
                     },
                     Err(async_channel::RecvError) => {
                         break
@@ -305,7 +336,7 @@ pub async fn main() {
     });
 
     let download_handles = urls.iter().map(move |&url| { 
-        let sender = sender.clone();
+        let warc_sender = warc_sender.clone();
         tokio::spawn(async move {
             //let stream_option = get_uncompressed_warc_records("https://github.com/webrecorder/warcio/raw/master/test/data/example.warc").await;
             //let stream_option = get_uncompressed_warc_records("https://raw.githubusercontent.com/sbeckeriv/warc_nom_parser/master/sample/plethora.warc").await;
@@ -318,7 +349,7 @@ pub async fn main() {
                     stream.for_each_concurrent(None, |x| async {
                         match x {
                             WarcResult::Ok(wr) => {
-                                sender.send(wr).await;
+                                warc_sender.send(wr).await;
                                 ()
                             },
                             _ => (),
@@ -354,7 +385,7 @@ pub async fn main() {
         })
     });
 
-    join_all(download_handles.chain(process_handles).chain(counter_handle)).await;
+    join_all(download_handles.chain(process_handles).chain(html_to_text_handles).chain(counter_handle)).await;
 
     
 }
