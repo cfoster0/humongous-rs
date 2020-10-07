@@ -7,10 +7,9 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = ["stream"]
-stream = ["reqwest", "async-compression/stream"]
-futures-io = ["async-compression/futures-io"]
-tokio-02 = ["tokio", "async-compression/tokio-02"]
+default = ["http"]
+http = ["reqwest", "async-compression/stream"]
+fs = ["async-fs", "async-compression/futures-io"]
 
 [dependencies]
 ammonia = "3.1.0"
@@ -30,5 +29,6 @@ warc_parser = "2.0.0"
 whatlang = "0.10.0"
 
 async-compression = { version = "0.3.5", features = ["gzip"], optional = true }
+async-fs = { version = "1.4.0", optional = true }
 reqwest = { version = "0.10.8", features = ["stream"], optional = true }
 tokio = { version = "0.2.22", optional = true }
