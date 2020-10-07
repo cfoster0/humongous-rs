@@ -21,7 +21,7 @@ use whatlang::detect;
 use httparse;
 use chardetng::EncodingDetector;
 use lol_html::{rewrite_str, RewriteStrSettings, ElementContentHandlers, Selector};
-use lol_html::html_content::{Element, TextChunk};
+use lol_html::html_content::{Element, Comment, TextChunk};
 
 pub type Warc = warc_parser::Record;
 pub struct WarcError();
@@ -265,7 +265,7 @@ pub fn remove_html_element(el: &mut Element) -> LOLResult {
 }
 
 pub fn remove_html_wrapper(el: &mut Element) -> LOLResult {
-    el.remove();
+    el.remove_and_keep_content();
     return Ok(());
 }
 
@@ -276,22 +276,58 @@ pub fn rename_to_block(el: &mut Element) -> LOLResult {
     }
 }
 
+pub fn rename_to_list(el: &mut Element) -> LOLResult {
+    match el.set_tag_name("list") {
+        Ok(_) => return Ok(()),
+        Err(_) => return Err(Box::new(core::fmt::Error)),
+    }
+}
+
+pub fn rename_to_item(el: &mut Element) -> LOLResult {
+    match el.set_tag_name("item") {
+        Ok(_) => return Ok(()),
+        Err(_) => return Err(Box::new(core::fmt::Error)),
+    }
+}
+
+pub fn remove_comment(com: &mut Comment) -> LOLResult {
+    com.remove();
+    return Ok(());
+}
+
+pub fn mark_block_ending(el: &mut Element) -> LOLResult {
+    el.append("<br/>", lol_html::html_content::ContentType::Html);
+    el.remove_and_keep_content();
+    return Ok(());
+}
+
 pub fn remove_spacing(tc: &mut TextChunk) -> LOLResult {
-    //let re = Regex::new("[ ]*[\r\n\t]+[ ]*").unwrap();
-
-    //let shortened = String::from(re.replace_all(tc.as_str(), ""));
-
-    let shortened = tc.as_str().replace("\r\n", "").replace("\t\t", "").replace("\n\n", "").replace("  ", "");
+    let shortened = tc.as_str().replace("\r\n", "").replace("\t", "").replace("\n", "").replace("  ", "");
     tc.replace(&shortened, lol_html::html_content::ContentType::Text);
     
     return Ok(());
 }
 
-pub fn selectors_and_fns() -> Vec<(Selector, ElementContentHandlers<'static>)> {
+pub fn outer_selectors_and_fns() -> Vec<(Selector, ElementContentHandlers<'static>)> {
     let all_selector: Selector = "*".parse().unwrap();
-    //let a_selector: Selector = "a".parse().unwrap();
-    //let div_selector: Selector = "div".parse().unwrap();
     let block_selector: Selector = "*".parse().unwrap();
+    let li_selector: Selector = "li".parse().unwrap();
+    let comment_selector: Selector = "*".parse().unwrap();
+
+    let list_types = [
+                        "ul",
+                        "ol",
+                        "dl",
+                        ];
+
+    let list_selectors = list_types.into_iter().map(|s| {
+        let sel: Selector = s.parse().unwrap();
+        return sel;
+    });
+
+    let list_handlers = list_selectors.map(|selector| {
+        (selector, ElementContentHandlers::default().element(rename_to_list))
+    });
 
     let unwanted_types = [
                             "applet",
@@ -314,6 +350,7 @@ pub fn selectors_and_fns() -> Vec<(Selector, ElementContentHandlers<'static>)> {
                             "map",
                             "meta",
                             "nav",
+                            "noframes",
                             "noscript",
                             "object",
                             "param",
@@ -344,7 +381,6 @@ pub fn selectors_and_fns() -> Vec<(Selector, ElementContentHandlers<'static>)> {
                         "colgroup",
                         "dd",
                         "div",
-                        "dl",
                         "fieldset",
                         "form",
                         "h1",
@@ -379,24 +415,39 @@ pub fn selectors_and_fns() -> Vec<(Selector, ElementContentHandlers<'static>)> {
     });
 
     let unwrap_types = [
+                        "abbr",
+                        "acronym",
+                        "address",
+                        "article",
+                        "aside",
                         "b",
+                        "big",
                         "cite",
                         "code",
+                        "data",
                         "details",
+                        "dfn",
                         "em",
                         "font",
+                        "footer",
+                        "header",
                         "i",
                         "ins",
                         "kbd",
+                        "label",
                         "pre",
                         "samp",
+                        "section",
                         "small",
                         "span",
+                        "summary",
                         "strike",
                         "strong",
                         "sub",
                         "sup",
+                        "time",
                         "u",
+                        "var",
                         ];
 
     let unwrap_selectors = unwrap_types.into_iter().map(|s| {
@@ -410,30 +461,72 @@ pub fn selectors_and_fns() -> Vec<(Selector, ElementContentHandlers<'static>)> {
 
     let mut handlers = vec![
         (all_selector, ElementContentHandlers::default().element(remove_attributes)),
+        (li_selector, ElementContentHandlers::default().element(rename_to_item)),
         (block_selector, ElementContentHandlers::default().text(remove_spacing)),
         //(a_selector, ElementContentHandlers::default().element(remove_html_element)),
         //(div_selector, ElementContentHandlers::default().element(remove_html_wrapper)),
+        (comment_selector, ElementContentHandlers::default().comments(remove_comment)),
     ];
     handlers.extend(unwanted_handlers);
+    handlers.extend(list_handlers);
     handlers.extend(unwrap_handlers);
     handlers.extend(block_handlers);
     handlers
 }
 
+pub fn inner_selectors_and_fns() -> Vec<(Selector, ElementContentHandlers<'static>)> {
+    let block_selector: Selector = "block".parse().unwrap();
+
+    let mut handlers = vec![
+                            (block_selector, ElementContentHandlers::default().element(mark_block_ending)),
+                            ];
+    handlers
+}
+
+pub fn remove_link_lists(text: String) -> String {
+    let list_of_links = Regex::new("((<a>.*</a>)(<a>.*</a>)+)").unwrap();
+    return list_of_links.replace(&text, " ").to_string();
+}
+
+pub fn translate_breaks(text: String) -> String {
+    let list_of_breaks = Regex::new("(<br/>)(<br/>)*").unwrap();
+    return list_of_breaks.replace(&text, "\n").to_string();  
+}
+
+pub fn remove_tags(text: String) -> String {
+    let sanitized = ammonia::Builder::default().allowed_classes(HashMap::new())
+                                                .tags(HashSet::new())
+                                                .generic_attributes(HashSet::new())
+                                                .clean(&text)
+                                                .to_string();
+    return sanitized;
+}
+
 pub fn html_to_text(text: String) -> Option<String> {
-    let (selector_vec, handler_vec): (Vec<Selector>, Vec<ElementContentHandlers>) = selectors_and_fns().into_iter().unzip();
-
-    let handlers = selector_vec.iter().zip(handler_vec.into_iter()).collect();
-
-    let settings = RewriteStrSettings {
-        element_content_handlers: handlers,
+    let (outer_selector_vec, outer_handler_vec): (Vec<Selector>, Vec<ElementContentHandlers>) = outer_selectors_and_fns().into_iter().unzip();
+    let outer_handlers = outer_selector_vec.iter().zip(outer_handler_vec.into_iter()).collect();
+    let outer_settings = RewriteStrSettings {
+        element_content_handlers: outer_handlers,
         ..RewriteStrSettings::default()
     };
 
-    match rewrite_str(&text, settings) {
-        Ok(rewritten) => {
-            trace!("HTML-to-Text: {:?}", rewritten);
-            Some(rewritten)
+    let (inner_selector_vec, inner_handler_vec): (Vec<Selector>, Vec<ElementContentHandlers>) = inner_selectors_and_fns().into_iter().unzip();
+    let inner_handlers = inner_selector_vec.iter().zip(inner_handler_vec.into_iter()).collect();
+    let inner_settings = RewriteStrSettings {
+        element_content_handlers: inner_handlers,
+        ..RewriteStrSettings::default()
+    };
+
+    match rewrite_str(&text, outer_settings) {
+        Ok(outer_text) => {
+            match rewrite_str(&outer_text, inner_settings) {
+                Ok(inner_text) => {
+                    let rewritten = remove_tags(remove_link_lists(translate_breaks(inner_text)));
+                    trace!("HTML-to-Text: {:?}", rewritten);
+                    Some(rewritten)
+                },
+                _ => None,
+            }
         },
         _ => None,
     }
@@ -445,12 +538,12 @@ pub async fn main() {
     env_logger::init();
 
     let urls = vec![
-        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00000.warc.gz",
+        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00000.warc.gz",
         //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00001.warc.gz",
         //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00002.warc.gz",
         //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00003.warc.gz",
         //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00004.warc.gz",
-        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00005.warc.gz",
+        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00005.warc.gz",
         //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00006.warc.gz",
         //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00007.warc.gz",
         //
