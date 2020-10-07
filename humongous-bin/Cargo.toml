@@ -1,5 +1,5 @@
 [package]
-name = "humongous"
+name = "humongous-rs"
 version = "0.1.0"
 authors = ["Charles Foster <cfoster0@ccrma.stanford.edu>"]
 edition = "2018"

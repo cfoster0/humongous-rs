@@ -6,10 +6,9 @@ use log::{trace, debug, info, warn, error};
 use env_logger;
 
 use humongous_lib::*;
-use humongous_lib::stream::get_compressed_warc_records;
+use humongous_lib::http::get_compressed_warc_records;
 use humongous_lib::conversions::{Lang, tag_language};
-use humongous_lib::conversions::http::{http_response_body};
-use humongous_lib::conversions::html::{html_to_text};
+use humongous_lib::conversions::{http_response_body, html_to_text};
 
 #[tokio::main]
 pub async fn main() {
