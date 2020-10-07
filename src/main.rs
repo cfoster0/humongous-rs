@@ -2,32 +2,26 @@
 use std::collections::{HashMap, HashSet};
 use bytes::Bytes;
 use std::cmp::min;
-use maplit::{hashmap, hashset};
+use regex::Regex;
+use std::error::Error;
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::io::{Error, ErrorKind};
-use futures::stream::{self, Stream, StreamExt, BoxStream};
+use std::io::ErrorKind;
+use futures::stream::{Stream, StreamExt, BoxStream};
 use async_compression::stream::GzipDecoder;
-use std::io::Result;
-use nom::{Err, IResult, Needed};
-use warc_parser::{record, records};
-use reqwest::{get, Response};
+use warc_parser::records;
 use futures::future::join_all;
-use tokio::prelude::*;
 use async_channel::unbounded;
 
 use log::{trace, debug, info, warn, error};
 use env_logger;
-use bumpalo::Bump;
 
 use whatlang::detect;
 use httparse;
 use chardetng::EncodingDetector;
-use encoding::DecoderTrap;
-use encoding::label::encoding_from_whatwg_label;
-use ammonia::Builder;
-use lol_html::{rewrite_str, RewriteStrSettings};
+use lol_html::{rewrite_str, RewriteStrSettings, ElementContentHandlers, Selector};
+use lol_html::html_content::{Element, TextChunk};
 
 pub type Warc = warc_parser::Record;
 pub struct WarcError();
@@ -42,8 +36,8 @@ pub enum WarcResult {
     Err(WarcError),
 }
 
-impl From<Result<Bytes>> for MyResult<Bytes, ()> {
-    fn from(item: Result<Bytes>) -> Self {
+impl<E> From<Result<Bytes, E>> for MyResult<Bytes, ()> {
+    fn from(item: Result<Bytes, E>) -> Self {
         match item {
             Ok(x) => {
                 MyResult::Ok(x)
@@ -53,6 +47,7 @@ impl From<Result<Bytes>> for MyResult<Bytes, ()> {
     }
 }
 
+/*
 impl From<reqwest::Result<Bytes>> for MyResult<Bytes, ()> {
     fn from(item: reqwest::Result<Bytes>) -> Self {
         match item {
@@ -63,6 +58,7 @@ impl From<reqwest::Result<Bytes>> for MyResult<Bytes, ()> {
         }
     }
 }
+*/
 
 pub struct WarcDecoder<'a> {
     stream: BoxStream<'a, MyResult<Bytes, ()>>,
@@ -175,7 +171,7 @@ pub async fn get_compressed_warc_records(url: &str) -> Option<WarcDecoder<'stati
                     Ok(x) => Ok(x),
                     _ => {
                         error!("Error mapping from reqwest::Result to std::io::Result!");
-                        Err(Error::new(ErrorKind::Other, "Decoding error."))
+                        Err(std::io::Error::new(ErrorKind::Other, "Decoding error."))
                     },
                 }
             }));
@@ -198,7 +194,7 @@ pub fn http_response_body(mut warc: Warc) -> Option<String> {
     let mut headers = [httparse::EMPTY_HEADER; 32];
 
     let body_index = match httparse::Response::new(&mut headers).parse(warc.content.as_slice()) {
-        Ok(httparse::Status::Complete((body_index))) => {
+        Ok(httparse::Status::Complete(body_index)) => {
             Some(body_index)
         },
         _ => {
@@ -220,7 +216,6 @@ pub fn http_response_body(mut warc: Warc) -> Option<String> {
         let (cow, true_encoding, malformed) = char_encoding.decode(&body);
         debug!("{:?}", true_encoding);
         let text = cow.into_owned();
-        //trace!("{:?}", text);
         return Some(text);
     } else {
         return None;
@@ -253,15 +248,196 @@ pub fn tag_language(text: &str) -> Option<whatlang::Lang> {
     return language;
 }
 
-pub fn html_to_text(settings: RewriteStrSettings, text: String) -> Option<String> {
-    match rewrite_str(&text, settings) {
-        Ok(rewritten) => Some(rewritten),
-        _ => None,
+pub type LOLResult = Result<(), Box<dyn Error>>;
+
+pub fn remove_attributes(el: &mut Element) -> LOLResult {
+    let attribute_names: Vec<String> = el.attributes().iter().map(|att| att.name()).collect();
+        
+    for attribute_name in attribute_names {
+        el.remove_attribute(&attribute_name);
+    }
+    return Ok(());
+}
+
+pub fn remove_html_element(el: &mut Element) -> LOLResult {
+    el.remove();
+    return Ok(());
+}
+
+pub fn remove_html_wrapper(el: &mut Element) -> LOLResult {
+    el.remove();
+    return Ok(());
+}
+
+pub fn rename_to_block(el: &mut Element) -> LOLResult {
+    match el.set_tag_name("block") {
+        Ok(_) => return Ok(()),
+        Err(_) => return Err(Box::new(core::fmt::Error)),
     }
 }
 
-pub fn default_rewriting_settings<'h, 's>() -> RewriteStrSettings<'h,'s> {
-    return RewriteStrSettings::default(); 
+pub fn remove_spacing(tc: &mut TextChunk) -> LOLResult {
+    //let re = Regex::new("[ ]*[\r\n\t]+[ ]*").unwrap();
+
+    //let shortened = String::from(re.replace_all(tc.as_str(), ""));
+
+    let shortened = tc.as_str().replace("\r\n", "").replace("\t\t", "").replace("\n\n", "").replace("  ", "");
+    tc.replace(&shortened, lol_html::html_content::ContentType::Text);
+    
+    return Ok(());
+}
+
+pub fn selectors_and_fns() -> Vec<(Selector, ElementContentHandlers<'static>)> {
+    let all_selector: Selector = "*".parse().unwrap();
+    //let a_selector: Selector = "a".parse().unwrap();
+    //let div_selector: Selector = "div".parse().unwrap();
+    let block_selector: Selector = "*".parse().unwrap();
+
+    let unwanted_types = [
+                            "applet",
+                            "audio",
+                            "base",
+                            "basefont",
+                            "button", // ?
+                            "canvas",
+                            "datalist", // ?
+                            "embed",
+                            "figcaption",
+                            "figure",
+                            "frame",
+                            "frameset",
+                            "iframe",
+                            "head",
+                            "img",
+                            "input", // ?
+                            "link",
+                            "map",
+                            "meta",
+                            "nav",
+                            "noscript",
+                            "object",
+                            "param",
+                            "progress",
+                            "script",
+                            "select", // ?
+                            "style",
+                            "source",
+                            "svg",
+                            "video",
+                            "wbr",
+                            ];
+
+    let unwanted_selectors = unwanted_types.into_iter().map(|s| {
+        let sel: Selector = s.parse().unwrap();
+        return sel;
+    });
+
+    let unwanted_handlers = unwanted_selectors.map(|selector| {
+        (selector, ElementContentHandlers::default().element(remove_html_element))
+    });
+
+    let block_types = [
+                        "blockquote",
+                        "caption",
+                        "center",
+                        "col",
+                        "colgroup",
+                        "dd",
+                        "div",
+                        "dl",
+                        "fieldset",
+                        "form",
+                        "h1",
+                        "h2",
+                        "h3",
+                        "h4",
+                        "h5",
+                        "h6",
+                        "legend",
+                        "li",
+                        "optgroup",
+                        "option",
+                        "p",
+                        "pre",
+                        "table",
+                        "td",
+                        "textarea",
+                        "tfoot",
+                        "th",
+                        "thead",
+                        "tr",
+                        "ul"
+                        ];
+
+    let block_selectors = block_types.into_iter().map(|s| {
+        let sel: Selector = s.parse().unwrap();
+        return sel;
+    });
+
+    let block_handlers = block_selectors.map(|selector| {
+        (selector, ElementContentHandlers::default().element(rename_to_block))
+    });
+
+    let unwrap_types = [
+                        "b",
+                        "cite",
+                        "code",
+                        "details",
+                        "em",
+                        "font",
+                        "i",
+                        "ins",
+                        "kbd",
+                        "pre",
+                        "samp",
+                        "small",
+                        "span",
+                        "strike",
+                        "strong",
+                        "sub",
+                        "sup",
+                        "u",
+                        ];
+
+    let unwrap_selectors = unwrap_types.into_iter().map(|s| {
+        let sel: Selector = s.parse().unwrap();
+        return sel;
+    });
+
+    let unwrap_handlers = unwrap_selectors.map(|selector| {
+        (selector, ElementContentHandlers::default().element(remove_html_wrapper))
+    });
+
+    let mut handlers = vec![
+        (all_selector, ElementContentHandlers::default().element(remove_attributes)),
+        (block_selector, ElementContentHandlers::default().text(remove_spacing)),
+        //(a_selector, ElementContentHandlers::default().element(remove_html_element)),
+        //(div_selector, ElementContentHandlers::default().element(remove_html_wrapper)),
+    ];
+    handlers.extend(unwanted_handlers);
+    handlers.extend(unwrap_handlers);
+    handlers.extend(block_handlers);
+    handlers
+}
+
+pub fn html_to_text(text: String) -> Option<String> {
+    let (selector_vec, handler_vec): (Vec<Selector>, Vec<ElementContentHandlers>) = selectors_and_fns().into_iter().unzip();
+
+    let handlers = selector_vec.iter().zip(handler_vec.into_iter()).collect();
+
+    let settings = RewriteStrSettings {
+        element_content_handlers: handlers,
+        ..RewriteStrSettings::default()
+    };
+
+    match rewrite_str(&text, settings) {
+        Ok(rewritten) => {
+            trace!("HTML-to-Text: {:?}", rewritten);
+            Some(rewritten)
+        },
+        _ => None,
+    }
+
 }
 
 #[tokio::main]
@@ -270,13 +446,13 @@ pub async fn main() {
 
     let urls = vec![
         "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00000.warc.gz",
-        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00001.warc.gz",
-        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00002.warc.gz",
-        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00003.warc.gz",
-        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00004.warc.gz",
-        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00005.warc.gz",
-        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00006.warc.gz",
-        "https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00007.warc.gz",
+        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00001.warc.gz",
+        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00002.warc.gz",
+        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00003.warc.gz",
+        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00004.warc.gz",
+        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00005.warc.gz",
+        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00006.warc.gz",
+        //"https://commoncrawl.s3.amazonaws.com/crawl-data/CC-MAIN-2020-34/segments/1596439735792.85/warc/CC-MAIN-20200803083123-20200803113123-00007.warc.gz",
         //
         //"https://archive.org/download/warc-www.hifimuseum.de-2018-11-26/www.hifimuseum.de_2018-11-26-00000.warc.gz",
         //"https://github.com/webrecorder/warcio/raw/master/test/data/example.warc.gz",
@@ -288,52 +464,6 @@ pub async fn main() {
     let (warc_sender, warc_receiver) = unbounded::<Warc>();
     let (html_sender, html_receiver) = unbounded::<(whatlang::Lang, String)>();
     let (tally_sender, tally_receiver) = unbounded::<()>();
-
-    let process_handles = [..N_TAGGING_TASKS].iter().map(move |_| {
-        let warc_receiver = warc_receiver.clone();
-        let html_sender = html_sender.clone();
-
-        tokio::spawn(async move {
-            loop {
-                match warc_receiver.recv().await {
-                    Ok(warc) => {
-                        if let Some(body) = http_response_body(warc) {
-                            let lang = tag_language(&body);
-                            match lang {
-                                Some(l) => {
-                                    html_sender.send((l, body)).await;
-                                },
-                                _ => ()
-                            }
-                        };
-                    },
-                    Err(async_channel::RecvError) => {
-                        break
-                    },
-                }
-            }
-            ()
-        })
-    });
-
-    let html_to_text_handles = [..N_HTML_TO_TEXT_TASKS].iter().map(move |_| {
-        let html_receiver = html_receiver.clone();
-        let tally_sender = tally_sender.clone();
-
-        tokio::spawn(async move {
-            loop {
-                match html_receiver.recv().await {
-                    Ok((lang, html)) => {
-                        tally_sender.send(()).await;
-                    },
-                    Err(async_channel::RecvError) => {
-                        break
-                    },
-                }
-            }
-            ()
-        })
-    });
 
     let download_handles = urls.iter().map(move |&url| { 
         let warc_sender = warc_sender.clone();
@@ -382,6 +512,53 @@ pub async fn main() {
             }
             
             info!("Final size of WARC record collection: {:?}", tally);
+        })
+    });
+
+    let process_handles = [..N_TAGGING_TASKS].iter().map(move |_| {
+        let warc_receiver = warc_receiver.clone();
+        let html_sender = html_sender.clone();
+
+        tokio::spawn(async move {
+            loop {
+                match warc_receiver.recv().await {
+                    Ok(warc) => {
+                        if let Some(body) = http_response_body(warc) {
+                            let lang = tag_language(&body);
+                            match lang {
+                                Some(l) => {
+                                    html_sender.send((l, body)).await;
+                                },
+                                _ => ()
+                            }
+                        };
+                    },
+                    Err(async_channel::RecvError) => {
+                        break
+                    },
+                }
+            }
+            ()
+        })
+    });
+
+    let html_to_text_handles = [..N_HTML_TO_TEXT_TASKS].iter().map(move |_| {
+        let html_receiver = html_receiver.clone();
+        let tally_sender = tally_sender.clone();
+
+        tokio::spawn(async move {
+            loop {
+                match html_receiver.recv().await {
+                    Ok((lang, html)) => {
+                        html_to_text(html);
+                        tally_sender.send(()).await;
+                    },
+                    Err(async_channel::RecvError) => {
+                        break
+                    },
+                }
+            }
+            ()
         })
     });
 
