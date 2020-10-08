@@ -9,7 +9,9 @@ edition = "2018"
 [features]
 default = ["http"]
 http = ["reqwest", "async-compression/stream"]
-fs = ["async-fs", "async-compression/futures-io"]
+fs-async-std = ["fs", "async-compression/futures-io", "async-std"]
+fs-tokio = ["fs", "async-compression/tokio-02", "tokio"]
+fs = []
 
 [dependencies]
 ammonia = "3.1.0"
@@ -18,6 +20,7 @@ chardetng = "0.1.9"
 encoding = "0.2.33"
 env_logger = "0.7.1"
 futures = "0.3.5"
+futures-io = "0.3.6"
 httparse = "1.3.4"
 log = "0.4.11"
 lol_html = "0.2.0"
@@ -29,6 +32,6 @@ warc_parser = "2.0.0"
 whatlang = "0.10.0"
 
 async-compression = { version = "0.3.5", features = ["gzip"], optional = true }
-async-fs = { version = "1.4.0", optional = true }
+async-std = { version = "1.6.5", optional = true }
 reqwest = { version = "0.10.8", features = ["stream"], optional = true }
 tokio = { version = "0.2.22", optional = true }
