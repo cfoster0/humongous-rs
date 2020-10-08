@@ -7,6 +7,8 @@ use env_logger;
 
 use humongous_lib::*;
 use humongous_lib::http::get_compressed_warc_records;
+//use humongous_lib::fs::fs_tokio::get_compressed_warc_records;
+//use humongous_lib::fs::fs_async_std::get_compressed_warc_records;
 use humongous_lib::conversions::{Lang, tag_language};
 use humongous_lib::conversions::{http_response_body, html_to_text};
 
@@ -126,6 +128,5 @@ pub async fn main() {
     });
 
     join_all(download_handles.chain(process_handles).chain(html_to_text_handles).chain(counter_handle)).await;
-
     
 }

@@ -9,8 +9,10 @@ use std::pin::Pin;
 
 #[cfg(feature = "http")]
 pub mod http;
+
 #[cfg(feature = "fs")]
 pub mod fs;
+
 pub mod conversions;
 
 pub type Warc = Record;
